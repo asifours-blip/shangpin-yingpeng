@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+psycopg2-binary
+redis
+minio
+python-dotenv
+pydantic-settings
+httpx
+cryptography>=45,<47
+python-multipart
+pillow
+pytest

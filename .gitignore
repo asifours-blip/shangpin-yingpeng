@@ -1,0 +1,37 @@
+# 环境与密钥
+.env
+.env.local
+.env.*.local
+*.pem
+deploy/stack.env
+deploy/secrets/
+deploy/runtime/
+deploy/backups/
+
+# Python
+.venv/
+backend/.venv/
+backend/venv/
+venv/
+__pycache__/
+backend/__pycache__/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.log
+/*.png
+.idea/
+.vscode/

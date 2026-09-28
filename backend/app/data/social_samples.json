@@ -1,0 +1,52 @@
+{
+  "accounts": [
+    {
+      "platform": "douyin",
+      "external_account_id": "sample_dy_01",
+      "display_name": "合成演示账号",
+      "data_source": "sample",
+      "contacts": [
+        {
+          "external_user_id": "sample_dy_01_u01",
+          "nickname": "合成联系人",
+          "avatar_url": null,
+          "remark": null,
+          "tags": [],
+          "data_source": "sample"
+        }
+      ]
+    },
+    {
+      "platform": "douyin",
+      "external_account_id": "sample_dy_02",
+      "display_name": "合成演示账号",
+      "data_source": "sample",
+      "contacts": [
+        {
+          "external_user_id": "sample_dy_02_u01",
+          "nickname": "合成联系人",
+          "avatar_url": null,
+          "remark": null,
+          "tags": [],
+          "data_source": "sample"
+        }
+      ]
+    },
+    {
+      "platform": "xiaohongshu",
+      "external_account_id": "sample_xhs_01",
+      "display_name": "合成演示账号",
+      "data_source": "sample",
+      "contacts": [
+        {
+          "external_user_id": "sample_xhs_01_u01",
+          "nickname": "合成联系人",
+          "avatar_url": null,
+          "remark": null,
+          "tags": [],
+          "data_source": "sample"
+        }
+      ]
+    }
+  ]
+}

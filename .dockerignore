@@ -1,0 +1,13 @@
+.git
+.env*
+**/.env*
+**/.venv
+**/node_modules
+**/dist
+**/__pycache__
+**/.pytest_cache
+deploy/secrets
+deploy/runtime
+deploy/backups
+docs/ops-preview/*.txt
+docs/ops-preview/*.png

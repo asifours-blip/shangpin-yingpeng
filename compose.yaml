@@ -1,0 +1,165 @@
+name: ${STUDIO_PROJECT_NAME:?Set STUDIO_PROJECT_NAME in deploy/stack.env}
+
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  image: ${STUDIO_PROJECT_NAME}-backend:stage6
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 120s
+  networks: [studio]
+  secrets: [postgres_password, redis_password, minio_access_key, minio_secret_key, session_key, oauth_keys]
+  environment: &backend-environment
+    APP_ENV: production
+    STUDIO_PROJECT_NAME: ${STUDIO_PROJECT_NAME:?Set STUDIO_PROJECT_NAME}
+    APP_HOST: 0.0.0.0
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    POSTGRES_USER: studio
+    POSTGRES_DB: studio
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    MINIO_ENDPOINT: minio:9000
+    MINIO_BUCKET: studio-assets
+    MINIO_PUBLIC_BASE_URL: ${STUDIO_PUBLIC_BASE_URL:?Set STUDIO_PUBLIC_BASE_URL}/objects
+    CORS_ORIGINS: ${STUDIO_PUBLIC_BASE_URL:?Set STUDIO_PUBLIC_BASE_URL}
+    PUBLISH_LIVE: "0"
+    DOUYIN_OAUTH_ENABLED: "0"
+    ARK_API_KEY: ""
+    DOUYIN_OAUTH_ACTIVE_KEY_VERSION: v1
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+    minio: {condition: service_healthy}
+
+services:
+  postgres:
+    image: ${STUDIO_POSTGRES_IMAGE:-postgres:17.11-alpine}
+    restart: unless-stopped
+    networks: [studio]
+    environment:
+      POSTGRES_USER: studio
+      POSTGRES_DB: studio
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U studio -d studio"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: ${STUDIO_REDIS_IMAGE:-redis:7.4.11-alpine}
+    restart: unless-stopped
+    networks: [studio]
+    secrets: [redis_password]
+    volumes: [redis_data:/data]
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        umask 077
+        test -s /run/secrets/redis_password
+        printf 'requirepass %s\nappendonly yes\n' "$$(cat /run/secrets/redis_password)" > /tmp/studio-redis.conf
+        exec redis-server /tmp/studio-redis.conf
+    healthcheck:
+      test: [CMD-SHELL, "REDISCLI_AUTH=$$(cat /run/secrets/redis_password) redis-cli ping 2>/dev/null | grep -qx PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    build:
+      context: .
+      dockerfile: deploy/minio/Dockerfile
+    image: ${STUDIO_MINIO_IMAGE:-${STUDIO_PROJECT_NAME}-minio:stage6}
+    command: server /data --console-address :9001
+    restart: unless-stopped
+    networks: [studio]
+    secrets: [minio_access_key, minio_secret_key]
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_access_key
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_secret_key
+    volumes: [minio_data:/data]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    <<: *backend
+    command: [api]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: ${STUDIO_PROJECT_NAME}-frontend:stage6
+    restart: unless-stopped
+    networks: [studio]
+    depends_on:
+      api: {condition: service_healthy}
+    ports: ["127.0.0.1:${STUDIO_HTTP_PORT:?Set STUDIO_HTTP_PORT}:80"]
+    volumes:
+      - ./deploy/runtime:/etc/studio-runtime:ro
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  migrate:
+    <<: *backend
+    profiles: [tools]
+    restart: "no"
+    command: [migrate]
+
+  migrate-0014:
+    <<: *backend
+    profiles: [tools]
+    restart: "no"
+    command: [migrate-0014]
+
+  generation-worker:
+    <<: *backend
+    profiles: [workers]
+    command: [generation-worker]
+
+  legacy-generation-worker:
+    <<: *backend
+    profiles: [workers]
+    command: [legacy-generation-worker]
+
+  publish-worker:
+    <<: *backend
+    profiles: [workers]
+    command: [publish-worker]
+
+  operation-scheduler:
+    <<: *backend
+    profiles: [scheduler]
+    command: [operation-scheduler]
+
+networks:
+  studio: {}
+
+volumes:
+  postgres_data: {}
+  redis_data: {}
+  minio_data: {}
+
+secrets:
+  postgres_password: {file: ./deploy/secrets/postgres_password}
+  redis_password: {file: ./deploy/secrets/redis_password}
+  minio_access_key: {file: ./deploy/secrets/minio_access_key}
+  minio_secret_key: {file: ./deploy/secrets/minio_secret_key}
+  session_key: {file: ./deploy/secrets/session_key}
+  oauth_keys: {file: ./deploy/secrets/oauth_keys}
+  smoke_password: {file: ./deploy/secrets/smoke_password}
