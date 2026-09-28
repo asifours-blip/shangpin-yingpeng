@@ -254,6 +254,9 @@
   "notes": [
     "Private source commit and blob provenance are retained outside this candidate.",
     "Excluded third-party SkyElite display video and poster; kept Inter with OFL.",
-    "Test MP4 is independently generated from FFmpeg lavfi solid gray, 64x64 H.264, one second."
-  ]
+    "Test MP4 is independently generated from FFmpeg lavfi solid gray, 64x64 H.264, one second.",
+    "File SHA-256 values describe the initial public root commit only; subsequent edits are outside this manifest."
+  ],
+  "scope": "initial_public_snapshot_only",
+  "base_public_commit": "60d048d1a2ee9beef754cc332343f0f5396fdedd"
 }

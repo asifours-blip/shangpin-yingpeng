@@ -1,0 +1,151 @@
+name: studio-public-showcase-20260928
+
+x-backend: &backend
+  image: studio-public-showcase-backend:local
+  networks: [isolated]
+  secrets: [postgres_password, redis_password, minio_access_key, minio_secret_key, session_key, oauth_keys]
+  environment: &backend-env
+    APP_ENV: production
+    APP_HOST: 0.0.0.0
+    PYTHONPATH: /app/backend
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    POSTGRES_USER: studio
+    POSTGRES_DB: studio_showcase
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    MINIO_ENDPOINT: minio:9000
+    MINIO_BUCKET: public-showcase-assets
+    MINIO_PUBLIC_BASE_URL: http://127.0.0.1:18260/objects
+    CORS_ORIGINS: http://127.0.0.1:18260
+    PUBLISH_LIVE: "0"
+    DOUYIN_OAUTH_ENABLED: "0"
+    DOUYIN_OAUTH_ACTIVE_KEY_VERSION: v1
+    ARK_API_KEY: isolated-local-upstream-only
+    ARK_BASE_URL: http://mock-upstream:18184/api/v3
+
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    networks: [isolated]
+    environment:
+      POSTGRES_USER: studio
+      POSTGRES_DB: studio_showcase
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U studio -d studio_showcase"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4.11-alpine
+    networks: [isolated]
+    secrets: [redis_password]
+    volumes: [redis_data:/data]
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        umask 077
+        printf 'requirepass %s\nappendonly yes\n' "$$(cat /run/secrets/redis_password)" > /tmp/redis.conf
+        exec redis-server /tmp/redis.conf
+    healthcheck:
+      test: [CMD-SHELL, "REDISCLI_AUTH=$$(cat /run/secrets/redis_password) redis-cli ping 2>/dev/null | grep -qx PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: studio-public-showcase-minio:local
+    networks: [isolated]
+    secrets: [minio_access_key, minio_secret_key]
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_access_key
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_secret_key
+    command: server /data --console-address :9001
+    volumes: [minio_data:/data]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mock-upstream:
+    image: studio-public-showcase-backend:local
+    networks: [isolated]
+    entrypoint: [python, /acceptance/mock_upstream.py]
+    volumes:
+      - ./mock_upstream.py:/acceptance/mock_upstream.py:ro
+    environment:
+      PUBLIC_FLOW_MOCK: "1"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18184/health',timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *backend
+    profiles: [tools]
+    command: [migrate]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
+  api:
+    <<: *backend
+    command: [api]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+      mock-upstream: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  tick:
+    <<: *backend
+    profiles: [tools]
+    entrypoint: [/bin/sh, /acceptance/run_tick.sh]
+    volumes:
+      - ./run_tick.py:/acceptance/run_tick.py:ro
+      - ./run_tick.sh:/acceptance/run_tick.sh:ro
+    depends_on:
+      api: {condition: service_healthy}
+      mock-upstream: {condition: service_healthy}
+
+  frontend:
+    image: studio-public-showcase-frontend:local
+    networks: [isolated, edge]
+    ports: ["127.0.0.1:18260:80"]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+networks:
+  isolated:
+    internal: true
+  edge: {}
+
+volumes:
+  postgres_data: {}
+  redis_data: {}
+  minio_data: {}
+
+secrets:
+  postgres_password: {file: ../../secrets/public-flow/postgres_password}
+  redis_password: {file: ../../secrets/public-flow/redis_password}
+  minio_access_key: {file: ../../secrets/public-flow/minio_access_key}
+  minio_secret_key: {file: ../../secrets/public-flow/minio_secret_key}
+  session_key: {file: ../../secrets/public-flow/session_key}
+  oauth_keys: {file: ../../secrets/public-flow/oauth_keys}
