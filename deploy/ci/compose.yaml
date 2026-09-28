@@ -1,0 +1,97 @@
+x-test-environment: &test-environment
+  APP_ENV: test
+  PUBLIC_CI_STRICT: "1"
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: studio_ci
+  POSTGRES_PASSWORD: synthetic-ci-postgres-only
+  POSTGRES_DB: studio_ci
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: synthetic-ci-redis-only
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: synthetic-ci-minio-user
+  MINIO_SECRET_KEY: synthetic-ci-minio-password
+  MINIO_BUCKET: aigc-images
+  SECRET_KEY: synthetic-ci-session-key-only
+  ARK_API_KEY: synthetic-ci-model-marker
+  ARK_IMAGE_ENDPOINT: ""
+  ARK_VIDEO_ENDPOINT: ""
+  ARK_BASE_URL: http://127.0.0.1:9
+  PUBLISH_LIVE: "0"
+  DOUYIN_OAUTH_ENABLED: "0"
+  DOUYIN_CLIENT_KEY: ""
+  DOUYIN_CLIENT_SECRET: ""
+
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: studio_ci
+      POSTGRES_PASSWORD: synthetic-ci-postgres-only
+      POSTGRES_DB: studio_ci
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [ci]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U studio_ci -d studio_ci"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4.11-alpine
+    command: [redis-server, --appendonly, "yes", --requirepass, synthetic-ci-redis-only]
+    volumes: [redis_data:/data]
+    networks: [ci]
+    healthcheck:
+      test: [CMD-SHELL, "REDISCLI_AUTH=synthetic-ci-redis-only redis-cli ping | grep -qx PONG"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    image: studio-public-ci-minio:local
+    entrypoint: [/usr/local/bin/minio]
+    command: [server, /data]
+    environment:
+      MINIO_ROOT_USER: synthetic-ci-minio-user
+      MINIO_ROOT_PASSWORD: synthetic-ci-minio-password
+    volumes: [minio_data:/data]
+    networks: [ci]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    image: studio-public-ci-backend:local
+    entrypoint: [alembic]
+    command: [upgrade, head]
+    environment: *test-environment
+    networks: [ci]
+    depends_on:
+      postgres: {condition: service_healthy}
+    profiles: [tools]
+    restart: "no"
+
+  test:
+    image: studio-public-ci-test:local
+    environment: *test-environment
+    volumes: [./results:/reports]
+    networks: [ci]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+    profiles: [tools]
+    restart: "no"
+
+networks:
+  ci:
+    internal: true
+
+volumes:
+  postgres_data: {}
+  redis_data: {}
+  minio_data: {}

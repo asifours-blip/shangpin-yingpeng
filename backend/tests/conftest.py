@@ -26,12 +26,25 @@ def local_test_font(monkeypatch):
 
 
 def pytest_configure(config) -> None:
-    # 现有工程 Settings 从 .env 读演示库名；本轮测试仍连同一 PG 实例，
-    # 但只用 ops_ 前缀用户。禁止测 demo/admin，禁止改任务 5。
     config.addinivalue_line(
         "markers",
         "real_storage: 使用当前配置的对象存储，不用内存替身",
     )
+
+
+def pytest_sessionstart(session) -> None:
+    if os.environ.get("PUBLIC_CI_STRICT") == "1" and not pg_available():
+        raise pytest.UsageError("PUBLIC_CI_STRICT requires a reachable PostgreSQL database")
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    if os.environ.get("PUBLIC_CI_STRICT") != "1":
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    skipped = reporter.stats.get("skipped", []) if reporter else []
+    if skipped:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        reporter.write_line(f"PUBLIC_CI_STRICT: {len(skipped)} skipped test(s) are failures")
 
 
 def pg_available() -> bool:

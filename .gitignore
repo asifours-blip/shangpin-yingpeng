@@ -27,6 +27,7 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+deploy/ci/results/
 
 # 系统与编辑器
 .DS_Store

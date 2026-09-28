@@ -1,0 +1,10 @@
+ARG RUNTIME_IMAGE=studio-public-ci-backend:local
+FROM ${RUNTIME_IMAGE}
+
+COPY deploy/ci/requirements.test.txt ./requirements.test.txt
+RUN python -m pip install --no-cache-dir -r requirements.test.txt
+
+COPY backend/tests ./tests
+COPY deploy/ci/run_tests.py ./ci_run_tests.py
+
+ENTRYPOINT ["python", "ci_run_tests.py"]
