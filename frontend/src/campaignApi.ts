@@ -2,6 +2,23 @@
 
 export type ReviewAsset = { asset_id: number; role: string; position: number }
 
+export type StoryboardShot = {
+  prompt: string
+  first_frame_task_id: number | null
+  first_frame_asset_id: number | null
+  first_frame_review: 'approved' | 'rejected' | null
+  video_task_id: number | null
+  video_asset_id: number | null
+  video_review: 'approved' | 'rejected' | null
+  locked: boolean
+}
+export type Storyboard = {
+  mode: 'reviewed_shots_v1'
+  product_asset_id: number
+  fact_version_id: number
+  shots: StoryboardShot[]
+}
+
 export type ReviewVariant = {
   id: number
   platform: string
@@ -12,6 +29,7 @@ export type ReviewVariant = {
   status: string
   fact_version_id: number | null
   qc_result: Record<string, unknown> | null
+  storyboard?: Storyboard | null
   assets: ReviewAsset[]
 }
 
@@ -35,6 +53,7 @@ export type ReviewPlatform = {
   current: ReviewVariant
   versions: ReviewVariant[]
   reviews: ReviewRecord[]
+  storyboard_tasks: Record<string, { status: string; error_message: string | null }>
   blockers: { code: string; message: string }[]
   steps: {
     step_key: string
@@ -57,6 +76,10 @@ export type ReviewPayload = {
   facts: Record<string, unknown>
   product_name: string
   primary_asset_id: number | null
+  generation_budget: number
+  budget_reserved: number
+  budget_remaining: number
+  provider_ready: { image: boolean; video: boolean }
   platforms: ReviewPlatform[]
   ark_live: string
 }
@@ -121,6 +144,15 @@ export const campaignApi = {
   start: (id: number, key: string) =>
     request<CampaignDetail>(`/api/campaigns/${id}/start`, { method: 'POST', headers: { 'Idempotency-Key': key } }),
   review: (id: number) => request<ReviewPayload>(`/api/campaigns/${id}/review`),
+  startStoryboard: (id: number, version: number) =>
+    request<{ id: number; version: number }>(`/api/campaigns/${id}/storyboard/start`, {
+      method: 'POST', headers: { 'If-Match': String(version) }, body: JSON.stringify({ expected_version: version }),
+    }),
+  shotAction: (id: number, shotIndex: number, action: string, version: number, extra: Record<string, unknown> = {}) =>
+    request<{ id: number; version: number }>(`/api/campaigns/${id}/storyboard/shots/${shotIndex}/${action}`, {
+      method: 'POST', headers: { 'If-Match': String(version) },
+      body: JSON.stringify({ expected_version: version, ...extra }),
+    }),
   edit: (id: number, platform: string, version: number, body: { title: string; body: string; hashtags: string[] }) =>
     request(`/api/campaigns/${id}/variants/${platform}`, {
       method: 'PATCH',

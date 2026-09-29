@@ -20,6 +20,7 @@ from app.services.campaign_service import (
     load_campaign,
     start_campaign,
 )
+from app.services.storyboard_review import change_shot, start_storyboard
 from app.services.variant_review import (
     ReviewBlocked,
     VersionConflict,
@@ -62,6 +63,13 @@ class RedoIn(BaseModel):
     expected_version: int | None = None
     step_keys: list[str] = Field(default_factory=list)
     comment: str | None = None
+
+
+class StoryboardActionIn(BaseModel):
+    expected_version: int | None = None
+    prompt: str | None = Field(default=None, max_length=4000)
+    accepted: bool | None = None
+    stage: str | None = None
 
 
 class FactForkIn(BaseModel):
@@ -271,6 +279,41 @@ def export_variant(
     except Exception:
         path.unlink(missing_ok=True)
         raise
+
+
+@router.post("/{campaign_id}/storyboard/start")
+def start_three_shots(
+    campaign_id: int,
+    body: StoryboardActionIn,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(require_unfrozen),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        created = start_storyboard(db, user, campaign_id, _expected(if_match, body.expected_version))
+        return {"id": created.id, "version": created.version}
+    except Exception as exc:
+        _guard(exc)
+
+
+@router.post("/{campaign_id}/storyboard/shots/{shot_index}/{action}")
+def update_storyboard_shot(
+    campaign_id: int,
+    shot_index: int,
+    action: str,
+    body: StoryboardActionIn,
+    if_match: str | None = Header(default=None),
+    user: User = Depends(require_unfrozen),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        created = change_shot(
+            db, user, campaign_id, _expected(if_match, body.expected_version), shot_index,
+            action, prompt=body.prompt, accepted=body.accepted, stage=body.stage,
+        )
+        return {"id": created.id, "version": created.version}
+    except Exception as exc:
+        _guard(exc)
 
 
 @router.get("/{campaign_id}/review")

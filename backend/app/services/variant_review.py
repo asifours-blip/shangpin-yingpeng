@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 
 from sqlalchemy import select, text
@@ -16,6 +17,7 @@ from app.models.campaign import (
     VariantAsset,
     VariantReview,
 )
+from app.core.config import settings
 from app.models.product import OwnedProduct, ProductFactVersion
 from app.models.user import User
 from app.services import storage
@@ -184,11 +186,20 @@ def approval_blockers(
     steps = _latest_platform_steps(db, run.id, variant.platform)
     expected = PLATFORM_STEPS[variant.platform]
     by_key = {step.step_key: step for step in steps}
-    if any(key not in by_key or by_key[key].status != "succeeded" for key in expected):
+    storyboard = variant.storyboard or {}
+    storyboard_mode = variant.platform == "douyin" and storyboard.get("mode") == "reviewed_shots_v1"
+    if not storyboard_mode and any(key not in by_key or by_key[key].status != "succeeded" for key in expected):
         blockers.append({"code": "generation_incomplete", "message": "这一侧生成还没完成"})
     assets = _assets(db, variant.id)
     roles = {item.role for item in assets}
-    if variant.platform == "douyin":
+    if storyboard_mode:
+        from app.services.storyboard_review import approved_assets
+
+        expected_assets = approved_assets(storyboard)
+        actual_assets = [(item.role, item.position, item.asset_id) for item in assets]
+        if expected_assets is None or sorted(actual_assets) != sorted(expected_assets):
+            blockers.append({"code": "storyboard_incomplete", "message": "三个镜头的首帧、视频都须审核通过并锁定"})
+    elif variant.platform == "douyin":
         if "cover" not in roles or "final_video" not in roles:
             blockers.append({"code": "assets_missing", "message": "抖音封面或成片缺失"})
     else:
@@ -265,7 +276,10 @@ def _snapshot(db: Session, variant: ContentVariant, fact: ProductFactVersion) ->
         ],
         "fact_version_id": fact.id,
         "fact_snapshot": dict(fact.facts or {}),
-        "qc_snapshot": dict(variant.qc_result or {}),
+        "qc_snapshot": {
+            **dict(variant.qc_result or {}),
+            **({"storyboard": deepcopy(variant.storyboard)} if (variant.storyboard or {}).get("mode") == "reviewed_shots_v1" else {}),
+        },
     }
 
 
@@ -487,7 +501,12 @@ def edit_variant(
         body=next_body,
         hashtags=next_tags,
     )
-    _queue(db, run, created, list(MEDIA_OF[platform]), human_step_id=human.id)
+    if (current.storyboard or {}).get("mode") == "reviewed_shots_v1":
+        created.storyboard = deepcopy(current.storyboard)
+        created.qc_result = deepcopy(current.qc_result)
+        _reuse_assets(db, current, created, [])
+    else:
+        _queue(db, run, created, list(MEDIA_OF[platform]), human_step_id=human.id)
     _sync_campaign(db, campaign)
     _commit_locked(db)
     db.refresh(created)
@@ -556,6 +575,8 @@ def redo_variant(
     campaign = _lock_campaign(db, user, campaign_id)
     current = _locked_current(db, campaign_id, platform, expected_version)
     run = _run(db, campaign.id)
+    if (current.storyboard or {}).get("mode") == "reviewed_shots_v1":
+        _release(db, ReviewBlocked("storyboard_mode", "三镜头请在镜头卡片中局部重做"))
     if any(step.status == "unknown" for step in _latest_platform_steps(db, run.id, platform)):
         _release(db, ReviewBlocked("result_unknown", "这一侧存在结果未知的生成请求，先人工核验，不能重做"))
     allowed = set(PLATFORM_STEPS[platform])
@@ -622,6 +643,16 @@ def fork_facts(
         for step in _latest_platform_steps(db, run.id, platform)
     ):
         _release(db, ReviewBlocked("result_unknown", "存在结果未知的生成请求，先人工核验，不能重排生成"))
+    if any(
+        (row.storyboard or {}).get("mode") == "reviewed_shots_v1"
+        for row in (db.scalar(
+            select(ContentVariant)
+            .where(ContentVariant.campaign_id == campaign.id, ContentVariant.platform == platform)
+            .order_by(ContentVariant.version.desc())
+        ) for platform in platforms)
+        if row is not None
+    ):
+        _release(db, ReviewBlocked("storyboard_mode", "三镜头版本锁定事实；新事实请新建活动"))
     previous = dict(current_fact.facts or {})
     created = ProductFactVersion(
         product_id=current_fact.product_id,
@@ -657,6 +688,8 @@ def fork_facts(
 
 
 def review_payload(db: Session, user: User, campaign_id: int) -> dict:
+    from app.services.storyboard_review import storyboard_tasks
+
     campaign = _campaign(db, user, campaign_id)
     run = _run(db, campaign.id)
     fact = db.get(ProductFactVersion, campaign.fact_version_id)
@@ -684,6 +717,7 @@ def review_payload(db: Session, user: User, campaign_id: int) -> dict:
             {
                 "platform": platform,
                 "current": _variant_dict(db, current),
+                "storyboard_tasks": storyboard_tasks(db, current.storyboard, campaign.owner_id),
                 "versions": [_variant_dict(db, row) for row in rows],
                 "reviews": [_review_dict(row) for row in reviews],
                 "blockers": approval_blockers(db, campaign, current),
@@ -710,6 +744,13 @@ def review_payload(db: Session, user: User, campaign_id: int) -> dict:
         "fact_version": None if fact is None else fact.version,
         "facts": {} if fact is None else dict(fact.facts or {}),
         "product_name": "" if product is None else product.name,
+        "generation_budget": run.generation_budget,
+        "budget_reserved": run.budget_reserved,
+        "budget_remaining": max(0, run.generation_budget - run.budget_reserved),
+        "provider_ready": {
+            "image": bool(settings.ARK_API_KEY and settings.ARK_IMAGE_ENDPOINT),
+            "video": bool(settings.ARK_API_KEY and settings.ARK_VIDEO_ENDPOINT),
+        },
         "primary_asset_id": None if product is None else product.primary_asset_id,
         "platforms": platforms,
         "ark_live": "pending",
@@ -727,6 +768,7 @@ def _variant_dict(db: Session, variant: ContentVariant) -> dict:
         "status": variant.status,
         "fact_version_id": variant.fact_version_id,
         "qc_result": variant.qc_result,
+        "storyboard": variant.storyboard,
         "assets": [
             {"asset_id": item.asset_id, "role": item.role, "position": item.position}
             for item in _assets(db, variant.id)

@@ -206,6 +206,8 @@ def content_blockers(
             blockers.append({"code": "review_mismatch", "message": "文案已经和审核快照不一致"})
         if list(snap.get("hashtags") or []) != list(variant.hashtags or []):
             blockers.append({"code": "review_mismatch", "message": "话题已经和审核快照不一致"})
+        if (variant.storyboard or {}).get("mode") == "reviewed_shots_v1" and (review.qc_snapshot or {}).get("storyboard") != variant.storyboard:
+            blockers.append({"code": "review_mismatch", "message": "三镜头内容已经和审核快照不一致"})
         live_assets = _identity(_asset_rows(db, variant.id))
         reviewed = _identity(list(review.asset_order or []))
         if live_assets != reviewed:
@@ -221,6 +223,12 @@ def content_blockers(
         seen.add(item["code"])
         deduped.append(item)
     return deduped
+
+
+def _storyboard_publish_blocker(variant: ContentVariant) -> dict | None:
+    if (variant.storyboard or {}).get("mode") == "reviewed_shots_v1":
+        return {"code": "storyboard_not_composited", "message": "三镜头只供独立导出，尚未合成为可发布视频"}
+    return None
 
 
 def _connection(db: Session, user: User, connection_id: int | None, platform: str) -> PlatformConnection | None:
@@ -258,6 +266,9 @@ def platform_view(db: Session, user: User, campaign: Campaign, platform: str) ->
     review = _latest_approval(db, variant) if variant.status == "approved" else None
     adapter = get_adapter(platform)
     content = content_blockers(db, campaign, variant)
+    publish_mode_blocker = _storyboard_publish_blocker(variant)
+    if publish_mode_blocker is not None:
+        content.append(publish_mode_blocker)
     connections = list(
         db.scalars(
             select(PlatformConnection)
@@ -371,6 +382,9 @@ def schedule_job(
     preview_variant = _current(db, campaign_id, platform)
     if preview_variant.version != expected_version:
         _release(db, VersionConflict("版本已变化"))
+    publish_mode_blocker = _storyboard_publish_blocker(preview_variant)
+    if publish_mode_blocker is not None:
+        _release(db, PublishBlocked(publish_mode_blocker["code"], publish_mode_blocker["message"]))
     preview_blockers = content_blockers(db, preview_campaign, preview_variant, check_storage=False)
     if preview_blockers:
         _release(db, PublishBlocked(preview_blockers[0]["code"], preview_blockers[0]["message"]))
@@ -387,6 +401,9 @@ def schedule_job(
 
     campaign = _lock_campaign(db, user, campaign_id)
     variant = _locked_current(db, campaign_id, platform, expected_version)
+    publish_mode_blocker = _storyboard_publish_blocker(variant)
+    if publish_mode_blocker is not None:
+        _release(db, PublishBlocked(publish_mode_blocker["code"], publish_mode_blocker["message"]))
     blockers = content_blockers(db, campaign, variant, check_storage=False)
     if blockers:
         _release(db, PublishBlocked(blockers[0]["code"], blockers[0]["message"]))

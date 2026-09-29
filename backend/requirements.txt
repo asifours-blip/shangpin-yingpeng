@@ -12,3 +12,4 @@ cryptography>=45,<47
 python-multipart
 pillow
 pytest
+tzdata==2026.4; platform_system == "Windows"
