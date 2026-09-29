@@ -53,17 +53,56 @@
         <el-input v-model="drafts[side.platform].tags" placeholder="用空格分隔" />
         <p v-if="humanCopy(side)" class="hint">这一版文案是人工修订，媒体依赖这次输入，不会把失败的旧文案改成成功。</p>
 
+        <section v-if="side.platform === 'douyin'" class="storyboard-panel">
+          <h3>三镜头审核</h3>
+          <p class="hint">三个镜头各自保留首帧和 5 秒视频；导出为分镜素材，不是拼接成片。旧版 FFmpeg 成片仍可沿原流程交付。</p>
+          <p class="hint">活动生成预算：{{ payload.generation_budget }} 次，已占用 {{ payload.budget_reserved }} 次，剩余 {{ payload.budget_remaining }} 次。每次提交图片或视频各占 1 次；不会自动连续提交。</p>
+          <p class="hint">方舟图片：{{ payload.provider_ready.image ? '已配置' : '未配置' }} · 视频：{{ payload.provider_ready.video ? '已配置' : '未配置' }}；配置存在不代表模型可调用或免费。</p>
+          <el-button v-if="side.current.storyboard?.mode !== 'reviewed_shots_v1'" :disabled="isStale(side.platform) || !!storyBusy" @click="onStartStoryboard(side)">开启三镜头版本</el-button>
+          <template v-else>
+            <p>当前审核版本 v{{ side.current.version }} · 三镜头事实版本 #{{ side.current.storyboard.fact_version_id }}</p>
+            <div class="story-shots">
+              <article v-for="(shot, index) in side.current.storyboard.shots" :key="index" class="story-shot">
+                <h4>镜头 {{ index + 1 }} · {{ shot.locked ? '已锁定' : '未锁定' }}</h4>
+                <el-input v-model="shotPrompts[index]" type="textarea" :rows="2" :disabled="shot.locked" aria-label="镜头描述" />
+                <p class="hint">修改描述后需点“重做首帧”才会保存；锁定镜头先显式解锁。</p>
+                <p>首帧：{{ shot.first_frame_review === 'approved' ? '审核通过' : shot.first_frame_review === 'rejected' ? '已退回' : taskStatus(side, shot.first_frame_task_id) }}</p>
+                <img v-if="shot.first_frame_asset_id" class="shot-media" :src="`/api/assets/${shot.first_frame_asset_id}/file`" :alt="`镜头 ${index + 1} 首帧`" />
+                <div class="actions">
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || !!shot.first_frame_task_id || !payload.provider_ready.image || payload.budget_remaining < 1" @click="onShotAction(side, index, 'submit_frame')">生成首帧</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || taskStatus(side, shot.first_frame_task_id) !== 'succeeded' || !!shot.first_frame_review" @click="onShotAction(side, index, 'review_frame', { accepted: true })">首帧通过</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || taskStatus(side, shot.first_frame_task_id) !== 'succeeded' || !!shot.first_frame_review" @click="onShotAction(side, index, 'review_frame', { accepted: false })">首帧退回</el-button>
+                </div>
+                <p>视频：{{ shot.video_review === 'approved' ? '审核通过' : shot.video_review === 'rejected' ? '已退回' : taskStatus(side, shot.video_task_id) }}</p>
+                <video v-if="shot.video_asset_id" class="shot-media" controls :src="`/api/assets/${shot.video_asset_id}/file`" :aria-label="`镜头 ${index + 1} 视频`"></video>
+                <div class="actions">
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || shot.first_frame_review !== 'approved' || !!shot.video_task_id || !payload.provider_ready.video || payload.budget_remaining < 1" @click="onShotAction(side, index, 'submit_video')">生成本镜头视频</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || taskStatus(side, shot.video_task_id) !== 'succeeded' || !!shot.video_review" @click="onShotAction(side, index, 'review_video', { accepted: true })">视频通过</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || taskStatus(side, shot.video_task_id) !== 'succeeded' || !!shot.video_review" @click="onShotAction(side, index, 'review_video', { accepted: false })">视频退回</el-button>
+                </div>
+                <div class="actions">
+                  <el-button v-if="!shot.locked" :disabled="isStale(side.platform) || !!storyBusy || shot.video_review !== 'approved'" @click="onShotAction(side, index, 'lock')">锁定镜头</el-button>
+                  <el-button v-else :disabled="isStale(side.platform) || !!storyBusy" @click="onShotAction(side, index, 'unlock')">解锁镜头</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked" @click="onShotAction(side, index, 'redo', { stage: 'first_frame', prompt: shotPrompts[index] })">只重做本镜头首帧</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || shot.first_frame_review !== 'approved'" @click="onShotAction(side, index, 'redo', { stage: 'video' })">只重做本镜头视频</el-button>
+                </div>
+              </article>
+            </div>
+            <el-button :disabled="!!storyBusy" @click="load">刷新生成状态</el-button>
+          </template>
+        </section>
+
         <h3>媒体预览</h3>
         <p class="hint">图片和视频从当前配置的对象存储读取。对象不存在或读不出来时，不能批准。</p>
         <ul class="asset-list">
           <li v-for="asset in side.current.assets" :key="`${asset.role}-${asset.position}-${asset.asset_id}`">
             <span>{{ asset.position }}. {{ roleLabel(asset.role) }} · 资产 {{ asset.asset_id }}</span>
-            <img v-if="asset.role !== 'final_video'" :src="`/api/assets/${asset.asset_id}/file`" alt="" />
+            <img v-if="asset.role !== 'final_video' && asset.role !== 'shot_video'" :src="`/api/assets/${asset.asset_id}/file`" alt="" />
             <video
               v-else
               controls
               :src="`/api/assets/${asset.asset_id}/file`"
-              :aria-label="`成片 ${asset.asset_id}`"
+              :aria-label="`${roleLabel(asset.role)} ${asset.asset_id}`"
             ></video>
           </li>
           <li v-if="!side.current.assets.length">这一版还没有媒体。印进画面的文案改过之后，封面、组图或视频要重新生成。</li>
@@ -101,13 +140,13 @@
         <p v-if="hasCurrentApproval(side)" class="hint">导出锁定这一版的审核快照；缺少发布账号也能交付素材。下载成功不代表已发布。</p>
         <p v-else class="hint">当前版本还没有有效批准。媒体或文案变化后，需重新审核才能导出。</p>
 
-        <h3>局部重做</h3>
-        <el-checkbox-group v-model="redos[side.platform]">
+        <h3 v-if="side.current.storyboard?.mode !== 'reviewed_shots_v1'">局部重做</h3>
+        <el-checkbox-group v-if="side.current.storyboard?.mode !== 'reviewed_shots_v1'" v-model="redos[side.platform]">
           <el-checkbox v-for="step in side.steps" :key="step.step_key" :value="step.step_key">
             重做 {{ stepLabel(step.step_key) }}（v{{ step.version }} {{ step.status }}）
           </el-checkbox>
         </el-checkbox-group>
-        <el-button :disabled="isStale(side.platform) || side.steps.some((item) => item.status === 'unknown')" @click="onRedo(side)">按所选步骤重做</el-button>
+        <el-button v-if="side.current.storyboard?.mode !== 'reviewed_shots_v1'" :disabled="isStale(side.platform) || side.steps.some((item) => item.status === 'unknown')" @click="onRedo(side)">按所选步骤重做</el-button>
         <p v-if="side.steps.some((item) => item.status === 'unknown')" class="warn">结果未知，先人工核对，不能盲目重提。</p>
 
         <h3>版本</h3>
@@ -222,6 +261,8 @@ const drafts = reactive<Record<string, { title: string; body: string; tags: stri
 })
 const comments = reactive<Record<string, string>>({ douyin: '', xiaohongshu: '' })
 const redos = reactive<Record<string, string[]>>({ douyin: [], xiaohongshu: [] })
+const shotPrompts = ref<string[]>(['', '', ''])
+const storyBusy = ref(false)
 const desk = ref<PublishDesk | null>(null)
 const accounts = reactive<Record<string, number | undefined>>({ douyin: undefined, xiaohongshu: undefined })
 const when = reactive<Record<string, string>>({ douyin: '', xiaohongshu: '' })
@@ -256,6 +297,8 @@ function roleLabel(role: string) {
   if (role === 'card') return '内容卡'
   if (role === 'final_video') return '成片'
   if (role === 'clip') return '镜头'
+  if (role === 'shot_first_frame') return '分镜首帧'
+  if (role === 'shot_video') return '分镜视频'
   return role
 }
 
@@ -268,6 +311,47 @@ function stepLabel(key: string) {
     'cards:xiaohongshu': '小红书组图',
   }
   return names[key] || key
+}
+
+function taskStatus(side: ReviewPlatform, taskId: number | null) {
+  if (!taskId) return '待生成'
+  const task = side.storyboard_tasks[String(taskId)]
+  if (!task) return '任务不可见'
+  if (task.status === 'succeeded') return '待人工审核'
+  if (task.status === 'queued') return '排队中'
+  if (task.status === 'running') return '生成中'
+  if (task.status === 'unknown') return '结果未知，禁止重提'
+  return task.error_message ? `失败：${task.error_message}` : task.status
+}
+
+async function onStartStoryboard(side: ReviewPlatform) {
+  if (!campaignId.value) return
+  storyBusy.value = true
+  try {
+    await campaignApi.startStoryboard(campaignId.value, side.current.version)
+    await refreshVersion('douyin')
+    ElMessage.success('三镜头已开启，请逐镜生成与审核')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '开启失败')
+    await load()
+  } finally {
+    storyBusy.value = false
+  }
+}
+
+async function onShotAction(side: ReviewPlatform, index: number, action: string, extra: Record<string, unknown> = {}) {
+  if (!campaignId.value) return
+  storyBusy.value = true
+  try {
+    await campaignApi.shotAction(campaignId.value, index, action, side.current.version, extra)
+    await refreshVersion('douyin')
+    ElMessage.success('镜头状态已更新')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '镜头操作失败')
+    await load()
+  } finally {
+    storyBusy.value = false
+  }
 }
 
 function notes(side: ReviewPlatform) {
@@ -316,6 +400,7 @@ async function load() {
     payload.value = review
     desk.value = publish
     fillDrafts(review)
+    shotPrompts.value = review.platforms.find((side) => side.platform === 'douyin')?.current.storyboard?.shots.map((shot) => shot.prompt) || ['', '', '']
     for (const side of publish.platforms) {
       if (!side.connections.some((row) => row.id === accounts[side.platform])) {
         accounts[side.platform] = undefined
@@ -667,4 +752,12 @@ label {
     display: grid;
   }
 }
+</style>
+
+
+<style scoped>
+.storyboard-panel { margin: 1.5rem 0; padding: 1rem; border: 1px solid var(--el-border-color); border-radius: 12px; }
+.story-shots { display: grid; gap: 1rem; margin: 1rem 0; }
+.story-shot { padding: 1rem; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
+.shot-media { display: block; max-width: 240px; max-height: 320px; margin: .5rem 0; }
 </style>

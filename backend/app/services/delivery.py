@@ -63,10 +63,15 @@ class DeliverySnapshot:
     started_at: datetime
     copy: dict
     assets: tuple[DeliveryAsset, ...]
+    storyboard: dict | None = None
 
 
 def _filename(export_order: int, role: str, mime: str) -> str:
     extension = _MIME_EXT.get(mime)
+    if role in {"shot_first_frame", "shot_video"}:
+        if (role == "shot_video") != (mime == "video/mp4") or extension is None:
+            raise DeliveryBlocked("asset_invalid", "分镜资产的媒体类型不符合要求")
+        return f"shots/{export_order // 2 + 1:02d}-{'video' if role == 'shot_video' else 'first-frame'}.{extension}"
     if extension is None or (role == "final_video") != (mime == "video/mp4"):
         raise DeliveryBlocked("asset_invalid", "审核资产的媒体类型不符合平台要求")
     return f"{export_order + 1:02d}-{'video' if role == 'final_video' else role}.{extension}"
@@ -74,14 +79,21 @@ def _filename(export_order: int, role: str, mime: str) -> str:
 
 def _descriptors(db: Session, user: User, review: VariantReview, platform: str) -> tuple[DeliveryAsset, ...]:
     entries = list(review.asset_order or [])
-    if not 2 <= len(entries) <= 5:
-        raise DeliveryBlocked("assets_missing", "审核快照缺少完整的媒体顺序")
-    if platform == "douyin":
-        ordered = sorted(entries, key=lambda item: {"cover": 0, "final_video": 1}.get(item.get("role"), 2))
+    storyboard_mode = platform == "douyin" and (review.qc_snapshot or {}).get("storyboard", {}).get("mode") == "reviewed_shots_v1"
+    if storyboard_mode:
+        if len(entries) != 6:
+            raise DeliveryBlocked("assets_missing", "审核快照须包含三个镜头的首帧和视频")
+        ordered = sorted(entries, key=lambda item: (item.get("position", -1), 0 if item.get("role") == "shot_first_frame" else 1))
+        expected = ["shot_first_frame", "shot_video"] * 3
     else:
-        ordered = sorted(entries, key=lambda item: (0 if item.get("role") == "cover" else 1, item.get("position", -1)))
+        if not 2 <= len(entries) <= 5:
+            raise DeliveryBlocked("assets_missing", "审核快照缺少完整的媒体顺序")
+        if platform == "douyin":
+            ordered = sorted(entries, key=lambda item: {"cover": 0, "final_video": 1}.get(item.get("role"), 2))
+        else:
+            ordered = sorted(entries, key=lambda item: (0 if item.get("role") == "cover" else 1, item.get("position", -1)))
+        expected = ["cover", "final_video"] if platform == "douyin" else ["cover", * (["card"] * (len(entries) - 1))]
     roles = [entry.get("role") for entry in ordered]
-    expected = ["cover", "final_video"] if platform == "douyin" else ["cover", *(["card"] * (len(entries) - 1))]
     if roles != expected:
         raise DeliveryBlocked("assets_missing", "审核快照的媒体角色或顺序不完整")
     positions = [entry.get("position") for entry in ordered]
@@ -89,6 +101,8 @@ def _descriptors(db: Session, user: User, review: VariantReview, platform: str) 
         raise DeliveryBlocked("asset_invalid", "审核快照的媒体顺序无效")
     if platform == "xiaohongshu" and positions != list(range(len(ordered))):
         raise DeliveryBlocked("asset_invalid", "内容卡的顺序不完整")
+    if storyboard_mode and positions != [0, 0, 1, 1, 2, 2]:
+        raise DeliveryBlocked("asset_invalid", "三镜头顺序不完整")
     if len({entry.get("asset_id") for entry in ordered}) != len(entries):
         raise DeliveryBlocked("asset_invalid", "审核快照含有重复的媒体资产")
     assets: list[DeliveryAsset] = []
@@ -167,6 +181,7 @@ def freeze_delivery(
             started_at=datetime.now(timezone.utc),
             copy=dict(review.copy_snapshot or {}),
             assets=assets,
+            storyboard=(review.qc_snapshot or {}).get("storyboard") if platform == "douyin" else None,
         )
     finally:
         db.rollback()
@@ -243,6 +258,20 @@ def build_archive(snapshot: DeliverySnapshot) -> Path:
                     "byte_size": len(payload),
                     "sha256": hashlib.sha256(payload).hexdigest(),
                 })
+            if snapshot.storyboard is not None:
+                storyboard_bytes = json.dumps({
+                    "mode": snapshot.storyboard.get("mode"),
+                    "scope": "three_reviewed_shots_not_composited",
+                    "shots": snapshot.storyboard.get("shots"),
+                }, ensure_ascii=False, indent=2).encode("utf-8")
+                if len(storyboard_bytes) > _MAX_COPY_BYTES:
+                    raise DeliveryBlocked("storyboard_too_large", "分镜说明超过导出上限")
+                bundle.writestr("storyboard.json", storyboard_bytes)
+                files.append({
+                    "file": "storyboard.json", "role": "storyboard", "position": len(files),
+                    "export_order": len(files), "mime": "application/json",
+                    "byte_size": len(storyboard_bytes), "sha256": hashlib.sha256(storyboard_bytes).hexdigest(),
+                })
             bundle.writestr("manifest.json", json.dumps({
                 "campaign_id": snapshot.campaign_id,
                 "platform": snapshot.platform,
@@ -251,6 +280,10 @@ def build_archive(snapshot: DeliverySnapshot) -> Path:
                 "reviewed_at": snapshot.reviewed_at.isoformat(),
                 "export_started_at": snapshot.started_at.isoformat(),
                 "boundary": "current_approved_at_export_start",
+                "media_scope": (
+                    "three_reviewed_shots_not_composited" if snapshot.storyboard is not None
+                    else "legacy_final_video" if snapshot.platform == "douyin" else "legacy_image_cards"
+                ),
                 "files": files,
             }, ensure_ascii=False, indent=2).encode("utf-8"))
         return path
