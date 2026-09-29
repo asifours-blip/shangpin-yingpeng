@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import zipfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from contextlib import contextmanager
 
+import pytest
+from PIL import Image
 from sqlalchemy import delete, select
 
 from app.core.config import settings
@@ -187,3 +192,135 @@ def test_wrong_owner_and_stale_version_cannot_submit(client, db, monkeypatch):
         assert run.budget_reserved <= run.generation_budget
     finally:
         cleanup(db, user, other)
+
+
+@pytest.mark.real_storage
+def test_storyboard_worker_uses_real_minio_and_blocks_uncomposited_publish(client, db, monkeypatch):
+    from app.services import worker_loop
+
+    source_image = io.BytesIO()
+    Image.new("RGB", (24, 24), "#cebda3").save(source_image, format="PNG")
+    frame_bytes = source_image.getvalue()
+    video_bytes = (Path(__file__).parent / "fixtures" / "publish-one-second.mp4").read_bytes()
+    monkeypatch.setattr(settings, "ARK_API_KEY", "synthetic-no-remote")
+    monkeypatch.setattr(settings, "ARK_IMAGE_ENDPOINT", "synthetic-image")
+    monkeypatch.setattr(settings, "ARK_VIDEO_ENDPOINT", "synthetic-video")
+    image_inputs = []
+    video_inputs = []
+
+    def fake_image(prompt, size, images):
+        assert size == "2048x2048" and len(images) == 1
+        image_inputs.append(images[0])
+        return {"data": [{"url": "mock://frame", "size": "24x24"}]}
+
+    def fake_video(prompt, image, **params):
+        assert params["duration"] == 5
+        video_inputs.append(image)
+        return "mock-video-task"
+
+    monkeypatch.setattr(worker_loop, "generate_i2i", fake_image)
+    monkeypatch.setattr(worker_loop, "create_i2v_task", fake_video)
+    monkeypatch.setattr(worker_loop, "wait_i2v_result", lambda _id, on_tick: "mock://video")
+    monkeypatch.setattr(worker_loop, "download_image", lambda url: (
+        (frame_bytes, "image/png") if url == "mock://frame" else (video_bytes, "video/mp4")
+    ))
+    user, product, campaign_id, version = _started(client, db)
+    source_key = db.get(ImageAsset, product.primary_asset_id).object_key
+    object_keys = [source_key]
+    try:
+        storage.put_bytes(source_key, frame_bytes, "image/png")
+        shot_assets = []
+        for shot in range(3):
+            submitted = _action(client, campaign_id, version, shot, "submit_frame")
+            assert submitted.status_code == 200, submitted.text
+            version = submitted.json()["version"]
+            board = client.get(f"/api/campaigns/{campaign_id}/review").json()["platforms"][0]["current"]["storyboard"]
+            frame_task_id = board["shots"][shot]["first_frame_task_id"]
+            queued_redo = _action(client, campaign_id, version, shot, "redo", stage="first_frame")
+            assert queued_redo.status_code == 422
+            assert queued_redo.json()["detail"]["code"] == "result_unknown"
+            assert worker_loop.claim_one(db) == frame_task_id
+            worker_loop.process_task(db, frame_task_id)
+            db.expire_all()
+            assert db.get(GenerationTask, frame_task_id).status == "succeeded"
+            frame_link = db.scalar(select(GenerationTaskAsset).where(
+                GenerationTaskAsset.task_id == frame_task_id, GenerationTaskAsset.role == "output",
+            ))
+            frame_asset = db.get(ImageAsset, frame_link.asset_id)
+            object_keys.append(frame_asset.object_key)
+            assert storage.get_bytes(frame_asset.object_key) == frame_bytes
+            reviewed = _action(client, campaign_id, version, shot, "review_frame", accepted=True)
+            assert reviewed.status_code == 200, reviewed.text
+            version = reviewed.json()["version"]
+
+            submitted = _action(client, campaign_id, version, shot, "submit_video")
+            assert submitted.status_code == 200, submitted.text
+            version = submitted.json()["version"]
+            board = client.get(f"/api/campaigns/{campaign_id}/review").json()["platforms"][0]["current"]["storyboard"]
+            video_task_id = board["shots"][shot]["video_task_id"]
+            queued_redo = _action(client, campaign_id, version, shot, "redo", stage="first_frame")
+            assert queued_redo.status_code == 422
+            assert queued_redo.json()["detail"]["code"] == "result_unknown"
+            assert worker_loop.claim_one(db) == video_task_id
+            worker_loop.process_task(db, video_task_id)
+            db.expire_all()
+            assert db.get(GenerationTask, video_task_id).status == "succeeded"
+            video_link = db.scalar(select(GenerationTaskAsset).where(
+                GenerationTaskAsset.task_id == video_task_id, GenerationTaskAsset.role == "output",
+            ))
+            video_asset = db.get(ImageAsset, video_link.asset_id)
+            object_keys.append(video_asset.object_key)
+            assert storage.get_bytes(video_asset.object_key) == video_bytes
+            reviewed = _action(client, campaign_id, version, shot, "review_video", accepted=True)
+            assert reviewed.status_code == 200, reviewed.text
+            version = reviewed.json()["version"]
+            locked = _action(client, campaign_id, version, shot, "lock")
+            assert locked.status_code == 200, locked.text
+            version = locked.json()["version"]
+            shot_assets.append((frame_asset.id, video_asset.id))
+        assert len(image_inputs) == len(video_inputs) == 3
+        assert all(value.startswith("data:image/png;base64,") for value in image_inputs + video_inputs)
+        approved = client.post(
+            f"/api/campaigns/{campaign_id}/variants/douyin/approve",
+            headers={"If-Match": str(version)}, json={"expected_version": version},
+        )
+        assert approved.status_code == 200, approved.text
+        desk = client.get(f"/api/campaigns/{campaign_id}/publish").json()["platforms"][0]
+        assert any(item["code"] == "storyboard_not_composited" for item in desk["content_blockers"])
+        scheduled = client.post(f"/api/campaigns/{campaign_id}/publish", json={
+            "platform": "douyin", "expected_version": version,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        })
+        assert scheduled.status_code == 422
+        assert scheduled.json()["detail"]["code"] == "storyboard_not_composited"
+        delivered = client.get(f"/api/campaigns/{campaign_id}/variants/douyin/export?version={version}")
+        assert delivered.status_code == 200, delivered.text
+        with zipfile.ZipFile(io.BytesIO(delivered.content)) as bundle:
+            manifest = json.loads(bundle.read("manifest.json"))
+            media = [item for item in manifest["files"] if item["role"].startswith("shot_")]
+            assert len(media) == 6 and "final_video" not in bundle.namelist()
+            assert [item["asset_id"] for item in media] == [
+                asset_id for pair in shot_assets for asset_id in pair
+            ]
+            for item in manifest["files"]:
+                payload = bundle.read(item["file"])
+                assert item["byte_size"] == len(payload)
+                assert item["sha256"] == hashlib.sha256(payload).hexdigest()
+        locked_redo = _action(client, campaign_id, version, 1, "redo", stage="video")
+        assert locked_redo.status_code == 422
+        unlocked = _action(client, campaign_id, version, 1, "unlock")
+        assert unlocked.status_code == 200, unlocked.text
+        version = unlocked.json()["version"]
+        redone = _action(client, campaign_id, version, 1, "redo", stage="video")
+        assert redone.status_code == 200, redone.text
+        after = client.get(f"/api/campaigns/{campaign_id}/review").json()["platforms"][0]["current"]["storyboard"]["shots"]
+        assert after[0]["first_frame_asset_id"] == shot_assets[0][0]
+        assert after[0]["video_asset_id"] == shot_assets[0][1]
+        assert after[1]["first_frame_asset_id"] == shot_assets[1][0]
+        assert after[1]["video_asset_id"] is None
+        assert after[2]["first_frame_asset_id"] == shot_assets[2][0]
+        assert after[2]["video_asset_id"] == shot_assets[2][1]
+    finally:
+        cleanup(db, user)
+        for key in object_keys:
+            storage.delete_object(key)
