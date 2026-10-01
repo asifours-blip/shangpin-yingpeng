@@ -42,3 +42,13 @@ python deploy/acceptance/public-flow/verify_download.py
 ```powershell
 docker compose -f deploy/acceptance/public-flow/compose.yaml stop
 ```
+
+三镜头审核按钮的前端回归可单独运行，不依赖上面的 Docker 流程：
+
+```powershell
+node deploy/acceptance/public-flow/storyboard_review_buttons.mjs
+```
+
+前提：本机安装 Chrome，并在仓库根目录执行 `npm ci --prefix frontend` 和 `npm ci --prefix deploy/acceptance/public-flow`。脚本启动临时本地 Vite 和 headless Chrome，渲染实际 Vue 页面，并用脚本模拟全部 `/api` 响应；非本地请求会被拦截。脚本核对首帧、视频通过/退回按钮的状态和请求参数，以及排队、运行、未知、失败、取消、缺失任务、锁定、旧版本、已审核和提交中禁用。通过仅证明前端条件与请求构造，不代表真实后端、存储或 Ark 生成已验收。
+
+2026-10-01 实测记录：基线 `13f2f1b5d055d2efe45d23fe01c584b171d00852`。在最终有效阶段 fixture 下，临时恢复四处原始状态比较后执行同一脚本，报 `AssertionError: 首帧通过 enabled=true`、实际 `false`，脚本退出码 1；随后在 `finally` 中恢复修复文件。修复后的脚本退出码 0，输出 `storyboard_review_buttons: PASS (rendered Vue, mocked /api, no backend)`；在 `frontend/` 执行 `npm run build` 退出码 0（Vue 类型检查及 Vite 构建通过，仅有现存的 500 kB 大 chunk 提示）。本次未调用真实后端、存储或 Ark 服务。

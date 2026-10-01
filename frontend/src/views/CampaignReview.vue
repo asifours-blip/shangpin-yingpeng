@@ -70,15 +70,15 @@
                 <img v-if="shot.first_frame_asset_id" class="shot-media" :src="`/api/assets/${shot.first_frame_asset_id}/file`" :alt="`镜头 ${index + 1} 首帧`" />
                 <div class="actions">
                   <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || !!shot.first_frame_task_id || !payload.provider_ready.image || payload.budget_remaining < 1" @click="onShotAction(side, index, 'submit_frame')">生成首帧</el-button>
-                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || taskStatus(side, shot.first_frame_task_id) !== 'succeeded' || !!shot.first_frame_review" @click="onShotAction(side, index, 'review_frame', { accepted: true })">首帧通过</el-button>
-                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || taskStatus(side, shot.first_frame_task_id) !== 'succeeded' || !!shot.first_frame_review" @click="onShotAction(side, index, 'review_frame', { accepted: false })">首帧退回</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || !taskSucceeded(side, shot.first_frame_task_id) || !!shot.first_frame_review" @click="onShotAction(side, index, 'review_frame', { accepted: true })">首帧通过</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || !taskSucceeded(side, shot.first_frame_task_id) || !!shot.first_frame_review" @click="onShotAction(side, index, 'review_frame', { accepted: false })">首帧退回</el-button>
                 </div>
                 <p>视频：{{ shot.video_review === 'approved' ? '审核通过' : shot.video_review === 'rejected' ? '已退回' : taskStatus(side, shot.video_task_id) }}</p>
                 <video v-if="shot.video_asset_id" class="shot-media" controls :src="`/api/assets/${shot.video_asset_id}/file`" :aria-label="`镜头 ${index + 1} 视频`"></video>
                 <div class="actions">
                   <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || shot.first_frame_review !== 'approved' || !!shot.video_task_id || !payload.provider_ready.video || payload.budget_remaining < 1" @click="onShotAction(side, index, 'submit_video')">生成本镜头视频</el-button>
-                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || taskStatus(side, shot.video_task_id) !== 'succeeded' || !!shot.video_review" @click="onShotAction(side, index, 'review_video', { accepted: true })">视频通过</el-button>
-                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || taskStatus(side, shot.video_task_id) !== 'succeeded' || !!shot.video_review" @click="onShotAction(side, index, 'review_video', { accepted: false })">视频退回</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || !taskSucceeded(side, shot.video_task_id) || !!shot.video_review" @click="onShotAction(side, index, 'review_video', { accepted: true })">视频通过</el-button>
+                  <el-button :disabled="isStale(side.platform) || !!storyBusy || shot.locked || !taskSucceeded(side, shot.video_task_id) || !!shot.video_review" @click="onShotAction(side, index, 'review_video', { accepted: false })">视频退回</el-button>
                 </div>
                 <div class="actions">
                   <el-button v-if="!shot.locked" :disabled="isStale(side.platform) || !!storyBusy || shot.video_review !== 'approved'" @click="onShotAction(side, index, 'lock')">锁定镜头</el-button>
@@ -322,6 +322,10 @@ function taskStatus(side: ReviewPlatform, taskId: number | null) {
   if (task.status === 'running') return '生成中'
   if (task.status === 'unknown') return '结果未知，禁止重提'
   return task.error_message ? `失败：${task.error_message}` : task.status
+}
+
+function taskSucceeded(side: ReviewPlatform, taskId: number | null) {
+  return !!taskId && side.storyboard_tasks[String(taskId)]?.status === 'succeeded'
 }
 
 async function onStartStoryboard(side: ReviewPlatform) {
