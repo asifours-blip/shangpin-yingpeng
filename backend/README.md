@@ -14,4 +14,6 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+`requirements.txt` 本身不写版本号：它引用与后端镜像相同的 `requirements.deploy.txt` 和与 CI 测试镜像相同的 `deploy/ci/requirements.test.txt`，本地装出的依赖版本与部署、CI 一致。需要调整版本时改这两份锁定文件，不要在 `requirements.txt` 里另写。
+
 公开快照中的 JPEG 是几何合成图，上传契约测试的 MP4 是独立生成的 1 秒纯色视频；真实媒体生成路径仍需要 FFmpeg 和字体。测试须连接独立的测试数据库，历史私有库数据不能用来宣称本快照已验收。
