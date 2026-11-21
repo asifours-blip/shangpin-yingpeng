@@ -14,4 +14,6 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+本地开发入口 `backend/requirements.txt` 引用后端镜像的 `backend/requirements.deploy.txt` 和 CI 测试镜像的 `deploy/ci/requirements.test.txt`。调整运行时或测试依赖时，修改对应的文件。仅 Windows 使用的 `tzdata` 单独在 `backend/requirements.txt` 中固定版本。
+
 公开快照中的 JPEG 是几何合成图，上传契约测试的 MP4 是独立生成的 1 秒纯色视频；真实媒体生成路径仍需要 FFmpeg 和字体。测试须连接独立的测试数据库，历史私有库数据不能用来宣称本快照已验收。

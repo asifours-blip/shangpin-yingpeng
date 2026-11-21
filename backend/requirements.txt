@@ -1,15 +1,9 @@
-fastapi
-uvicorn[standard]
-sqlalchemy
-alembic
-psycopg2-binary
-redis
-minio
-python-dotenv
-pydantic-settings
-httpx
-cryptography>=45,<47
-python-multipart
-pillow
-pytest
+# 本地开发依赖：与部署 / CI 共用同一组锁定版本，避免本地环境与 CI 漂移。
+# 运行时版本以 requirements.deploy.txt 为唯一来源（后端镜像与 CI 都用它安装）；
+# 测试版本以 deploy/ci/requirements.test.txt 为唯一来源（CI 测试镜像用它安装）。
+# 不要在本文件里另写包名或放宽版本；需要调整版本时，改对应的锁定文件。
+-r requirements.deploy.txt
+-r ../deploy/ci/requirements.test.txt
+
+# Windows 缺少系统时区数据库，本地在 Windows 上开发时需要 tzdata（已锁定）。
 tzdata==2026.4; platform_system == "Windows"
